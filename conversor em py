@@ -1,0 +1,141 @@
+import os
+import re
+import shutil
+import pdfplumber
+from decimal import Decimal, ROUND_HALF_UP
+
+# --------------------------------------------------------
+# CONFIGURAÇÃO: aponte para sua pasta de entrada e saída
+INPUT_DIR       = r"C:\Users\IPacheco\OneDrive - Theodosio Randon\Área de Trabalho\Renomear certificados"
+OUTPUT_BASE_DIR = r"C:\Users\IPacheco\OneDrive - Theodosio Randon\Área de Trabalho\Certificados renomeados\07_08_2025_2025-08-07"
+# --------------------------------------------------------
+
+def frac_to_decimal(s):
+    """
+    Converte strings como "1 1/2", "1/4" ou "2" para Decimal de polegadas.
+    """
+    s = s.strip()
+    if "/" in s:
+        # pode ser "a b/c" ou "b/c"
+        parts = s.split()
+        if len(parts) == 2:
+            whole, frac = parts
+        else:
+            whole, frac = "0", parts[0]
+        num, den = frac.split("/")
+        return Decimal(whole) + Decimal(num) / Decimal(den)
+    return Decimal(s.replace(',', '.'))
+
+def inches_to_mm_str(raw):
+    """
+    Recebe raw como "4", "1.1/2" ou "30MM".
+    Extrai apenas número/fração e converte para mm com 1 casa.
+    """
+    # isola parte antes de '"' ou "MM"
+    m = re.search(r'([\d\.,/ ]+)(?=(?:\"|MM))', raw, re.IGNORECASE)
+    if not m:
+        raise ValueError(f"Dimensão inválida: {raw}")
+    token = m.group(1).replace('.', ' ').strip()
+    inches = frac_to_decimal(token)
+    mm = (inches * Decimal('25.4')).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)
+    # troca ponto decimal por vírgula
+    return str(mm).replace('.', ',')
+
+def extrair_texto(path_pdf):
+    with pdfplumber.open(path_pdf) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+def extrair_data(texto):
+    m = re.search(r"Emiss(?:ã|a)o:\s*(\d{2})/(\d{2})/(\d{4})", texto, re.IGNORECASE)
+    if not m:
+        raise RuntimeError("Data de emissão não encontrada")
+    dia, mes, ano = m.groups()
+    return f"{dia}_{mes}_{ano}"
+
+def parse_desc_lines(texto):
+    """
+    Retorna todas as linhas que representam itens:
+    inícios com número de item e terminam em quantidade + PC/CJ.
+    """
+    lines = [l.strip() for l in texto.splitlines() if l.strip()]
+    padrao = re.compile(r'^\d+\s+.*\s+\d+\s+(?:PC|CJ)$', re.IGNORECASE)
+    return [l for l in lines if padrao.match(l)]
+
+def limpar_descricao(desc_line):
+    """
+    Remove os 3 primeiros tokens (item, corrida, referência)
+    e os 2 últimos (quantidade, unidade), preserva tudo entre eles.
+    Em seguida, remove COD:, troca "/" por "_" e limpa espaços.
+    """
+    tokens = desc_line.split()
+    core = tokens[3:-2]
+    # remove "COD:xxxx" se vier junto
+    core = [t for t in core if not t.upper().startswith("COD:")]
+    texto = " ".join(core)
+    texto = re.split(r'(?<=\d)(?=\")', texto)[0]  # corta a partir da aspas "
+    texto = texto.replace("/", "_")
+    texto = re.sub(r'\s+', " ", texto).strip()
+    return texto
+
+def extrair_material(desc_line):
+    """
+    Tenta INOX ou I XXX, senão EPDM ou BORRACHA.
+    """
+    m = re.search(r'(?:INOX|I)\s+(\d{3,4}L?)', desc_line, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    # fallback para EPDM/BORRACHA
+    if re.search(r'EPDM', desc_line, re.IGNORECASE):
+        return "EPDM"
+    if re.search(r'BORRACHA', desc_line, re.IGNORECASE):
+        return "BORRACHA"
+    return "SEM_MATERIAL"
+
+def process_pdf(pdf_path, output_dir):
+    texto = extrair_texto(pdf_path)
+    data   = extrair_data(texto)
+    descs  = parse_desc_lines(texto)
+
+    if not descs:
+        raise RuntimeError("Nenhum item identificado.")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    for desc_line in descs:
+        descricao = limpar_descricao(desc_line)
+        material  = extrair_material(desc_line)
+        try:
+            dim_mm = inches_to_mm_str(desc_line)
+        except Exception as e:
+            print(f"[AVISO] falha dimensão: '{desc_line}' → {e}")
+            continue
+
+        nome_pdf = f"{descricao} – {material} – {dim_mm}mm – {data}.pdf"
+        destino  = os.path.join(output_dir, nome_pdf)
+
+        # evita sobrescrever
+        base, ext = os.path.splitext(destino)
+        cnt = 1
+        while os.path.exists(destino):
+            destino = f"{base}_{cnt}{ext}"
+            cnt += 1
+
+        shutil.copy(pdf_path, destino)
+        print("Gerado:", nome_pdf)
+
+if __name__ == "__main__":
+    os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
+
+    for f in os.listdir(INPUT_DIR):
+        if not f.lower().endswith(".pdf"):
+            continue
+
+        src     = os.path.join(INPUT_DIR, f)
+        subdir  = os.path.splitext(f)[0]
+        out_dir = os.path.join(OUTPUT_BASE_DIR, subdir)
+
+        print(f"\n→ Processando '{f}' → '{subdir}'")
+        try:
+            process_pdf(src, out_dir)
+        except Exception as err:
+            print("[ERRO]", err)
