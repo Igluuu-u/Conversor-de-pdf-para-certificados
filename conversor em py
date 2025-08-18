@@ -15,15 +15,20 @@ def frac_to_decimal(s):
             whole, frac = "0", parts[0]
         num, den = frac.split("/")
         return Decimal(whole) + Decimal(num) / Decimal(den)
-    return Decimal(s.replace(",", "."))
+    return Decimal(s.replace(",", ".").replace(" ", ""))
 
 def inches_to_mm_str(raw):
     m = re.search(r'([\d\.,/ ]+)(?=(?:\"|MM))', raw, re.IGNORECASE)
-    token = m.group(1).replace(".", " ").strip()
-    inches = frac_to_decimal(token)
-    mm = (inches * Decimal("25.4")).quantize(Decimal("0.1"),
-                                              rounding=ROUND_HALF_UP)
-    return str(mm).replace(".", ",")
+    if not m:
+        return "SEM_DIM"
+    token = m.group(1).strip()
+    try:
+        inches = frac_to_decimal(token)
+        mm = (inches * Decimal("25.4")).quantize(Decimal("0.1"),
+                                                  rounding=ROUND_HALF_UP)
+        return str(mm).replace(".", ",")
+    except Exception:
+        return "SEM_DIM"
 
 def extrair_texto(path_pdf):
     with pdfplumber.open(path_pdf) as pdf:
@@ -32,20 +37,42 @@ def extrair_texto(path_pdf):
 def extrair_data(texto):
     m = re.search(r"Emiss(?:ã|a)o:\s*(\d{2})/(\d{2})/(\d{4})",
                   texto, re.IGNORECASE)
+    if not m:
+        return "SEM_DATA"
     dia, mes, ano = m.groups()
     return f"{dia}_{mes}_{ano}"
 
 def parse_desc_lines(texto):
     lines = [l.strip() for l in texto.splitlines() if l.strip()]
-    pad = re.compile(r'^\d+\s+.*\s+\d+\s+(?:PC|CJ)$', re.IGNORECASE)
+    # captura linhas que comecem com número e contenham material (INOX, I 304/316, EPDM, BORRACHA)
+    pad = re.compile(
+        r'^\d+\s+.*?(?:INOX|I\s*\d{3,4}L?|EPDM|BORRACHA)',
+        re.IGNORECASE
+    )
     return [l for l in lines if pad.match(l)]
+
 
 def limpar_descricao(desc_line):
     tokens = desc_line.split()
-    core = [t for t in tokens[1:-2] if not t.upper().startswith("COD:")]
-    texto = " ".join(core)
+
+    # remove primeiro token (número sequencial do item, ex: "1")
+    tokens = tokens[1:]
+
+    # ignora códigos puramente numéricos ou com pontos/barras
+    desc_tokens = []
+    for t in tokens:
+        if re.match(r'^[\d\./]+$', t):  # só número/ponto/barra → ignora
+            continue
+        desc_tokens.append(t)
+
+    texto = " ".join(desc_tokens)
+
+    # corta na primeira aspa se houver (para evitar lixo depois)
     texto = re.split(r'(?<=\d)(?=\")', texto)[0].replace("/", "_")
-    return re.sub(r'\s+', " ", texto).strip()
+
+    # substitui múltiplos espaços
+    texto = re.sub(r'\s+', " ", texto).strip()
+    return texto
 
 def extrair_material(desc_line):
     m = re.search(r'(?:INOX|I)\s+(\d{3,4}L?)', desc_line, re.IGNORECASE)
@@ -56,6 +83,10 @@ def extrair_material(desc_line):
     if re.search(r'BORRACHA', desc_line, re.IGNORECASE):
         return "BORRACHA"
     return "SEM_MAT"
+
+def sanitize_filename(name):
+    # remove caracteres inválidos no Windows
+    return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 def processa_arquivos(arquivos, output_dir, log_widget):
     os.makedirs(output_dir, exist_ok=True)
@@ -73,9 +104,11 @@ def processa_arquivos(arquivos, output_dir, log_widget):
             for linha in descs:
                 descricao = limpar_descricao(linha)
                 material  = extrair_material(linha)
-                dim_mm     = inches_to_mm_str(linha)
-                novo_nome  = f"{descricao} – {material} – {dim_mm}mm – {data}.pdf"
-                dst        = os.path.join(pasta_item, novo_nome)
+                dim_mm    = inches_to_mm_str(linha)
+                novo_nome = f"{descricao} - {material} - {dim_mm}mm - {data}.pdf"
+                novo_nome = sanitize_filename(novo_nome)
+
+                dst = os.path.join(pasta_item, novo_nome)
 
                 base, ext = os.path.splitext(dst)
                 cnt = 1
