@@ -18,10 +18,13 @@ def frac_to_decimal(s):
     return Decimal(s.replace(",", ".").replace(" ", ""))
 
 def inches_to_mm_str(raw):
-    m = re.search(r'([\d\.,/ ]+)(?=(?:\"|MM))', raw, re.IGNORECASE)
-    if not m:
+    matches = re.findall(r'([\d\.,/]+)(?=(?:\"|MM))', raw, re.IGNORECASE)
+    if not matches:
         return "SEM_DIM"
-    token = m.group(1).strip()
+
+    token = matches[-1].strip()
+    token = re.sub(r'(\d+)\.(\d+)/(\d+)', r'\1 \2/\3', token)  # corrige 1.1/2
+
     try:
         inches = frac_to_decimal(token)
         mm = (inches * Decimal("25.4")).quantize(Decimal("0.1"),
@@ -44,35 +47,25 @@ def extrair_data(texto):
 
 def parse_desc_lines(texto):
     lines = [l.strip() for l in texto.splitlines() if l.strip()]
-    # captura linhas que comecem com número e contenham material (INOX, I 304/316, EPDM, BORRACHA)
     pad = re.compile(
         r'^\d+\s+.*?(?:INOX|I\s*\d{3,4}L?|EPDM|BORRACHA)',
         re.IGNORECASE
     )
     return [l for l in lines if pad.match(l)]
 
-
 def limpar_descricao(desc_line):
     tokens = desc_line.split()
+    tokens = tokens[1:]  # remove número do item
 
-    # remove primeiro token (número sequencial do item, ex: "1")
-    tokens = tokens[1:]
-
-    # ignora códigos puramente numéricos ou com pontos/barras
     desc_tokens = []
     for t in tokens:
-        if re.match(r'^[\d\./]+$', t):  # só número/ponto/barra → ignora
+        if re.match(r'^[\d\./]+$', t):
             continue
         desc_tokens.append(t)
 
     texto = " ".join(desc_tokens)
-
-    # corta na primeira aspa se houver (para evitar lixo depois)
     texto = re.split(r'(?<=\d)(?=\")', texto)[0].replace("/", "_")
-
-    # substitui múltiplos espaços
-    texto = re.sub(r'\s+', " ", texto).strip()
-    return texto
+    return re.sub(r'\s+', " ", texto).strip()
 
 def extrair_material(desc_line):
     m = re.search(r'(?:INOX|I)\s+(\d{3,4}L?)', desc_line, re.IGNORECASE)
@@ -85,10 +78,9 @@ def extrair_material(desc_line):
     return "SEM_MAT"
 
 def sanitize_filename(name):
-    # remove caracteres inválidos no Windows
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
-def processa_arquivos(arquivos, output_dir, log_widget):
+def processa_arquivos(arquivos, output_dir, log_widget, progress=None):
     os.makedirs(output_dir, exist_ok=True)
 
     for src in arquivos:
@@ -97,9 +89,8 @@ def processa_arquivos(arquivos, output_dir, log_widget):
             texto = extrair_texto(src)
             data  = extrair_data(texto)
             descs = parse_desc_lines(texto)
-            subp  = os.path.splitext(fname)[0]
-            pasta_item = os.path.join(output_dir, subp)
-            os.makedirs(pasta_item, exist_ok=True)
+
+            pasta_item = output_dir  # não cria subpasta extra
 
             for linha in descs:
                 descricao = limpar_descricao(linha)
@@ -117,7 +108,16 @@ def processa_arquivos(arquivos, output_dir, log_widget):
                     cnt += 1
 
                 shutil.copy(src, dst)
+
+                # escreve log
                 log_widget.insert("end", f"Gerado: {dst}\n")
+                log_widget.see("end")
+
+                # atualiza progressbar (se fornecida)
+                if progress:
+                    progress["value"] += 1
+                    progress.update_idletasks()
 
         except Exception as e:
             log_widget.insert("end", f"[ERRO] {fname}: {e}\n")
+            log_widget.see("end")
