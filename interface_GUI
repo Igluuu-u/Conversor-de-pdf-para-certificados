@@ -1,0 +1,139 @@
+# -*- coding: utf-8 -*-
+import os
+import threading
+import tkinter as tk
+from tkinter import filedialog, simpledialog, scrolledtext, messagebox, ttk
+from renomear_certificados import processa_arquivos, extrair_texto, parse_desc_lines
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Renomeador de Certificados")
+        self.geometry("750x550")
+        self.configure(bg="#f0f2f5")  # fundo cinza claro
+        self.resizable(False, False)
+
+        # Tema + estilos
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TFrame", background="#ffffff")
+        style.configure("TLabel", background="#ffffff", font=("Segoe UI", 10))
+        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=6)
+        style.configure("TEntry", padding=5)
+        style.configure("Horizontal.TProgressbar", thickness=18)
+
+        # Container principal (card)
+        card = ttk.Frame(self, padding=20)
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # --- Seleção de PDF ---
+        ttk.Label(card, text="Certificado (.pdf):").grid(row=0, column=0, sticky="w", pady=5)
+        self.inp_entry = ttk.Entry(card, width=60)
+        self.inp_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(card, text="Browse…", command=self.browse_input).grid(row=0, column=2, padx=5, pady=5)
+
+        # --- Pasta de saída ---
+        ttk.Label(card, text="Pasta de saída:").grid(row=1, column=0, sticky="w", pady=5)
+        self.out_entry = ttk.Entry(card, width=60)
+        self.out_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(card, text="Browse…", command=self.browse_output).grid(row=1, column=2, padx=5, pady=5)
+
+        # --- Botões de ação ---
+        btn_frame = ttk.Frame(card)
+        btn_frame.grid(row=2, column=0, columnspan=3, pady=15)
+
+        self.btn_renomear = ttk.Button(btn_frame, text="Renomear certificados",
+                                       command=self.start_processing)
+        self.btn_renomear.grid(row=0, column=0, padx=5)
+
+        ttk.Button(btn_frame, text="Salvar log", command=self.save_log).grid(row=0, column=1, padx=5)
+
+        # --- Barra de progresso ---
+        self.progress = ttk.Progressbar(card, orient="horizontal", mode="determinate")
+        self.progress.grid(row=3, column=0, columnspan=3, sticky="ew", pady=10)
+
+        # --- Área de log ---
+        ttk.Label(card, text="Log de processamento:").grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 2))
+        self.log = scrolledtext.ScrolledText(card, height=15, font=("Consolas", 9))
+        self.log.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=5)
+
+        # expandir log corretamente
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_rowconfigure(5, weight=1)
+
+    # --- Métodos auxiliares ---
+    def browse_input(self):
+        path = filedialog.askopenfilename(
+            title="Selecione o certificado (PDF)",
+            filetypes=[("Arquivos PDF", "*.pdf")]
+        )
+        if path:
+            self.inp_entry.delete(0, tk.END)
+            self.inp_entry.insert(0, path)
+
+    def browse_output(self):
+        parent = filedialog.askdirectory(
+            title="Selecione o diretório onde será criada a nova pasta"
+        )
+        if not parent:
+            return
+
+        nome = simpledialog.askstring(
+            "Nome da pasta",
+            "Digite o nome da nova pasta:"
+        )
+        if not nome:
+            return
+
+        path = os.path.join(parent, nome)
+        os.makedirs(path, exist_ok=True)
+
+        self.out_entry.delete(0, tk.END)
+        self.out_entry.insert(0, path)
+
+    def save_log(self):
+        path = filedialog.asksaveasfilename(
+            title="Salvar log",
+            defaultextension=".txt",
+            filetypes=[("Arquivo texto", "*.txt")]
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.log.get("1.0", tk.END))
+        messagebox.showinfo("Log salvo", f"Log exportado em:\n{path}")
+
+    def start_processing(self):
+        inp = self.inp_entry.get().strip()
+        out = self.out_entry.get().strip()
+        if not inp or not os.path.isfile(inp):
+            messagebox.showwarning("Aviso", "Selecione um arquivo PDF válido.")
+            return
+        if not out or not os.path.isdir(out):
+            messagebox.showwarning("Aviso", "Crie ou selecione a pasta de saída.")
+            return
+
+        try:
+            texto = extrair_texto(inp)
+            self.total_items = len(parse_desc_lines(texto))
+        except Exception:
+            self.total_items = 0
+
+        self.progress["maximum"] = self.total_items if self.total_items else 1
+        self.progress["value"] = 0
+
+        self.btn_renomear.state(["disabled"])
+        self.log.delete("1.0", tk.END)
+
+        threading.Thread(target=self.run_job, args=(inp, out), daemon=True).start()
+
+    def run_job(self, inp, out):
+        arquivos = [inp]
+        processa_arquivos(arquivos, out, log_widget=self.log, progress=self.progress)
+        self.btn_renomear.state(["!disabled"])
+        messagebox.showinfo("Concluído", f"Processamento finalizado. {self.total_items} itens gerados.")
+
+
+if __name__ == "__main__":
+    App().mainloop()
